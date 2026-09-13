@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Translate Bubble</string>
+    <string name="accessibility_service_description">Allows the app to read the text currently visible on your screen so it can be translated. No text is stored; it is only translated on-device when you tap the floating bubble.</string>
+</resources>
