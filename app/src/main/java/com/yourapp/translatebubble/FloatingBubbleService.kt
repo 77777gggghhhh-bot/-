@@ -15,6 +15,9 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
@@ -41,17 +44,36 @@ class FloatingBubbleService : Service() {
         private const val LONG_PRESS_MS = 600L
         private const val MAX_BLOCKS = 60
         const val ACTION_STOP = "com.yourapp.translatebubble.ACTION_STOP"
+
+        // Bubble colors for each state, so the user can tell what's happening
+        // just by looking at the bubble (no need to read a toast).
+        private const val COLOR_IDLE = "#3F51B5"       // blue: ready, nothing translated yet
+        private const val COLOR_TRANSLATING = "#FFA000" // orange: working right now
+        private const val COLOR_ACTIVE = "#43A047"      // green: translation is showing on screen
     }
 
     private lateinit var windowManager: WindowManager
     private var bubbleView: View? = null
-    private var overlayContainer: FrameLayout? = null
     private lateinit var bubbleParams: WindowManager.LayoutParams
+
+    // Each translated block is now its OWN small overlay window positioned
+    // exactly over the original text, so it can be dragged independently.
+    private val translatedLabelViews = mutableListOf<Pair<View, WindowManager.LayoutParams>>()
 
     private val serviceJob = Job()
     private val serviceScope = CoroutineScope(Dispatchers.Main + serviceJob)
     private val translatorHelper = TranslatorHelper()
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    private val vibrator: Vibrator by lazy {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val manager = getSystemService(VibratorManager::class.java)
+            manager.defaultVibrator
+        } else {
+            @Suppress("DEPRECATION")
+            getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+        }
+    }
 
     private var overlayIsShowing = false
     private var isTranslating = false
@@ -125,10 +147,26 @@ class FloatingBubbleService : Service() {
         startForeground(NOTIF_ID, notification)
     }
 
+    // ---------------------------------------------------------------------
+    // Haptics: one short tick so the user feels the tap was registered.
+    // ---------------------------------------------------------------------
+    private fun vibrateTick() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            vibrator.vibrate(VibrationEffect.createOneShot(35, VibrationEffect.DEFAULT_AMPLITUDE))
+        } else {
+            @Suppress("DEPRECATION")
+            vibrator.vibrate(35)
+        }
+    }
+
+    private fun setBubbleColor(hex: String) {
+        (bubbleView as? ImageView)?.setBackgroundColor(Color.parseColor(hex))
+    }
+
     private fun addBubble() {
         val bubble = ImageView(this).apply {
             setImageResource(android.R.drawable.ic_menu_send)
-            setBackgroundColor(Color.parseColor("#3F51B5"))
+            setBackgroundColor(Color.parseColor(COLOR_IDLE))
             setPadding(24, 24, 24, 24)
         }
         bubbleView = bubble
@@ -196,6 +234,7 @@ class FloatingBubbleService : Service() {
                         val dy = abs(event.rawY - initialTouchY)
                         val isTap = dx < CLICK_DRAG_THRESHOLD && dy < CLICK_DRAG_THRESHOLD
                         if (isTap) {
+                            vibrateTick() // feel the tap immediately, before any work happens
                             onBubbleClicked()
                         }
                     }
@@ -217,16 +256,20 @@ class FloatingBubbleService : Service() {
 
     // ---------------------------------------------------------------------
     // Tap bubble = TOGGLE: if overlay showing, hide it. Otherwise translate
-    // every visible text block and show each translation at its own
-    // position, in a pass-through (non-touchable) window.
+    // every visible text block and show each translation in place, over its
+    // own original position, as an individually draggable mini window.
     // ---------------------------------------------------------------------
 
     private fun onBubbleClicked() {
         if (overlayIsShowing) {
             removeWordOverlay()
+            setBubbleColor(COLOR_IDLE)
             return
         }
-        if (isTranslating) return
+        if (isTranslating) {
+            Toast.makeText(this, "Still translating\u2026", Toast.LENGTH_SHORT).show()
+            return
+        }
 
         val accessibilityService = TranslationAccessibilityService.instance
         if (accessibilityService == null) {
@@ -241,6 +284,7 @@ class FloatingBubbleService : Service() {
         }
 
         isTranslating = true
+        setBubbleColor(COLOR_TRANSLATING)
         Toast.makeText(this, "Translating\u2026", Toast.LENGTH_SHORT).show()
 
         val limited = blocks.take(MAX_BLOCKS)
@@ -260,44 +304,25 @@ class FloatingBubbleService : Service() {
             isTranslating = false
             if (translatedBlocks.isEmpty()) {
                 Toast.makeText(this@FloatingBubbleService, "Translation failed", Toast.LENGTH_SHORT).show()
+                setBubbleColor(COLOR_IDLE)
             } else {
                 showWordOverlay(translatedBlocks)
+                setBubbleColor(COLOR_ACTIVE)
             }
         }
     }
 
     // ---------------------------------------------------------------------
-    // Word-position overlay: one full-screen NON-TOUCHABLE window holding
-    // small translated labels placed exactly over each original text's
-    // bounds. FLAG_NOT_TOUCHABLE lets every touch pass straight through
-    // to the app underneath, so scrolling/tapping still works normally.
+    // In-place overlay: one small independent window PER translated block,
+    // placed exactly over that block's original position with a white
+    // background (like Google Lens), and individually draggable. Because
+    // each window only covers its own text (not the full screen), the
+    // empty space between them is untouched and taps still reach the app
+    // underneath normally.
     // ---------------------------------------------------------------------
 
     private fun showWordOverlay(items: List<Pair<ScreenTextBlock, String>>) {
         removeWordOverlay()
-
-        val container = FrameLayout(this)
-
-        for ((block, translated) in items) {
-            val label = TextView(this).apply {
-                text = translated
-                setTextColor(Color.WHITE)
-                setBackgroundColor(Color.parseColor("#CC1A237E"))
-                textSize = 11f
-                setPadding(6, 2, 6, 2)
-                maxLines = 3
-            }
-            val width = (block.bounds.width()).coerceAtLeast(dpToPx(20))
-            val lp = FrameLayout.LayoutParams(
-                width,
-                FrameLayout.LayoutParams.WRAP_CONTENT
-            )
-            lp.leftMargin = block.bounds.left
-            lp.topMargin = block.bounds.top
-            container.addView(label, lp)
-        }
-
-        overlayContainer = container
 
         val overlayType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -306,29 +331,70 @@ class FloatingBubbleService : Service() {
             WindowManager.LayoutParams.TYPE_PHONE
         }
 
-        val params = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT,
-            overlayType,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.START
-            x = 0
-            y = 0
+        for ((block, translated) in items) {
+            val label = TextView(this).apply {
+                text = translated
+                setTextColor(Color.BLACK)
+                setBackgroundColor(Color.WHITE) // Lens-style: covers the original word
+                textSize = 12f
+                setPadding(6, 2, 6, 2)
+                maxLines = 4
+            }
+
+            val width = block.bounds.width().coerceAtLeast(dpToPx(20))
+            val params = WindowManager.LayoutParams(
+                width,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                overlayType,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.TOP or Gravity.START
+                x = block.bounds.left
+                y = block.bounds.top
+            }
+
+            windowManager.addView(label, params)
+            attachLabelDragListener(label, params)
+            translatedLabelViews.add(label to params)
         }
 
-        windowManager.addView(overlayContainer, params)
         overlayIsShowing = true
     }
 
-    private fun removeWordOverlay() {
-        overlayContainer?.let {
-            runCatching { windowManager.removeView(it) }
-            overlayContainer = null
+    // Simple drag-only listener for each translated label (no click action
+    // needed here — tapping the label just picks it up to move it).
+    private fun attachLabelDragListener(label: View, params: WindowManager.LayoutParams) {
+        var initialX = 0
+        var initialY = 0
+        var initialTouchX = 0f
+        var initialTouchY = 0f
+
+        label.setOnTouchListener { view, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    initialX = params.x
+                    initialY = params.y
+                    initialTouchX = event.rawX
+                    initialTouchY = event.rawY
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    params.x = initialX + (event.rawX - initialTouchX).toInt()
+                    params.y = initialY + (event.rawY - initialTouchY).toInt()
+                    runCatching { windowManager.updateViewLayout(view, params) }
+                    true
+                }
+                else -> false
+            }
         }
+    }
+
+    private fun removeWordOverlay() {
+        translatedLabelViews.forEach { (view, _) ->
+            runCatching { windowManager.removeView(view) }
+        }
+        translatedLabelViews.clear()
         overlayIsShowing = false
     }
 
