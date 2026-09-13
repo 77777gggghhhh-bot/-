@@ -1,5 +1,7 @@
 package com.yourapp.translatebubble
 
+import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -7,10 +9,9 @@ import android.provider.Settings
 import android.text.TextUtils
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
-import android.app.Activity
-import androidx.core.content.ContextCompat
 
 class MainActivity : Activity() {
 
@@ -18,6 +19,37 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        val prefs = getSharedPreferences("crash_log", Context.MODE_PRIVATE)
+        val lastCrash = prefs.getString("last_crash", null)
+
+        if (lastCrash != null) {
+            val root = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(32, 96, 32, 32)
+            }
+            val label = TextView(this).apply {
+                text = "Last crash:"
+                setPadding(0, 0, 0, 16)
+            }
+            val crashText = TextView(this).apply {
+                text = lastCrash
+                textSize = 11f
+            }
+            val scroll = ScrollView(this).apply { addView(crashText) }
+            val clearButton = Button(this).apply {
+                text = "Clear and continue"
+                setOnClickListener {
+                    prefs.edit().remove("last_crash").apply()
+                    recreate()
+                }
+            }
+            root.addView(label)
+            root.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+            root.addView(clearButton)
+            setContentView(root)
+            return
+        }
 
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -50,7 +82,7 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        refreshStatus()
+        if (::statusView.isInitialized) refreshStatus()
     }
 
     private fun refreshStatus() {
@@ -103,7 +135,15 @@ class MainActivity : Activity() {
             return
         }
         val intent = Intent(this, FloatingBubbleService::class.java)
-        ContextCompat.startForegroundService(this, intent)
+        androidx_startForeground(intent)
         Toast.makeText(this, "Bubble started", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun androidx_startForeground(intent: Intent) {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
     }
 }
