@@ -57,13 +57,14 @@ class TranslatorHelper {
     // ---------------------------------------------------------------------
     suspend fun translateBatch(
         texts: List<String>,
-        maxConcurrent: Int = 4
+        maxConcurrent: Int = 4,
+        forcedDirection: Boolean? = null // null = auto-detect per block; true = force Arabic->English; false = force English->Arabic
     ): List<Result<String>> = coroutineScope {
         val semaphore = Semaphore(maxConcurrent)
         texts.map { text ->
             async {
                 semaphore.withPermit {
-                    translate(text, arabicToEnglish = isArabicDominant(text))
+                    translate(text, arabicToEnglish = forcedDirection ?: isArabicDominant(text))
                 }
             }
         }.awaitAll()
