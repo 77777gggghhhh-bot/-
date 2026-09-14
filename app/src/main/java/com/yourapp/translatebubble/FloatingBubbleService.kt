@@ -351,13 +351,13 @@ class FloatingBubbleService : Service() {
         Toast.makeText(this, "Translating\u2026", Toast.LENGTH_SHORT).show()
 
         val limited = blocks.take(MAX_BLOCKS)
-        val sampleText = limited.joinToString(" ") { it.text }
-        val arToEn = translatorHelper.looksArabic(sampleText)
 
         serviceScope.launch {
+            // Each block's own text decides its own translation direction -
+            // see TranslatorHelper.translateBatch for why this matters on
+            // mixed-language screens.
             val results = translatorHelper.translateBatch(
-                texts = limited.map { it.text },
-                arabicToEnglish = arToEn
+                texts = limited.map { it.text }
             )
 
             val translatedBlocks = limited.zip(results).mapNotNull { (block, result) ->
