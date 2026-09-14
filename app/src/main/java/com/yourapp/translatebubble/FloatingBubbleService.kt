@@ -49,7 +49,10 @@ class FloatingBubbleService : Service() {
         private const val PREFS_NAME = "bubble_prefs"
         private const val PREF_X = "bubble_x"
         private const val PREF_Y = "bubble_y"
+        private const val PREF_TEXT_SIZE_LEVEL = "text_size_level" // 0=small,1=medium,2=large
+        private const val PREF_LANGUAGE_MODE = "language_mode"     // 0=auto,1=force ar->en,2=force en->ar
         const val ACTION_STOP = "com.yourapp.translatebubble.ACTION_STOP"
+        const val ACTION_HIDE_OVERLAY = "com.yourapp.translatebubble.ACTION_HIDE_OVERLAY"
 
         // Bubble colors for each state, so the user can tell what's happening
         // just by looking at the bubble (no need to read a toast).
@@ -84,9 +87,15 @@ class FloatingBubbleService : Service() {
     private var overlayIsShowing = false
     private var isTranslating = false
 
-    private val stopReceiver = object : BroadcastReceiver() {
+    private val actionReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            stopSelf()
+            when (intent?.action) {
+                ACTION_STOP -> stopSelf()
+                ACTION_HIDE_OVERLAY -> {
+                    removeWordOverlay()
+                    setBubbleColor(COLOR_IDLE)
+                }
+            }
         }
     }
 
@@ -99,18 +108,21 @@ class FloatingBubbleService : Service() {
         addBubble()
         maybeRequestIgnoreBatteryOptimizations()
 
-        val filter = IntentFilter(ACTION_STOP)
+        val filter = IntentFilter().apply {
+            addAction(ACTION_STOP)
+            addAction(ACTION_HIDE_OVERLAY)
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(stopReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            registerReceiver(actionReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
         } else {
             @Suppress("UnspecifiedRegisterReceiverFlag")
-            registerReceiver(stopReceiver, filter)
+            registerReceiver(actionReceiver, filter)
         }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        runCatching { unregisterReceiver(stopReceiver) }
+        runCatching { unregisterReceiver(actionReceiver) }
         removeWordOverlay()
         bubbleView?.let { runCatching { windowManager.removeView(it) } }
         translatorHelper.close()
@@ -118,9 +130,15 @@ class FloatingBubbleService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
-            stopSelf()
-            return START_NOT_STICKY
+        when (intent?.action) {
+            ACTION_STOP -> {
+                stopSelf()
+                return START_NOT_STICKY
+            }
+            ACTION_HIDE_OVERLAY -> {
+                removeWordOverlay()
+                setBubbleColor(COLOR_IDLE)
+            }
         }
         return START_STICKY
     }
@@ -142,12 +160,19 @@ class FloatingBubbleService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        val hideIntent = Intent(ACTION_HIDE_OVERLAY).setPackage(packageName)
+        val hidePendingIntent = PendingIntent.getBroadcast(
+            this, 1, hideIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Translate Bubble is running")
-            .setContentText("Tap bubble to toggle translation. Long-press bubble or tap Stop to close.")
+            .setContentText("Tap bubble to translate/refresh. Hide clears the overlay; Stop closes the bubble.")
             .setSmallIcon(android.R.drawable.ic_menu_view)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_MIN)
+            .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Hide", hidePendingIntent)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Stop", stopPendingIntent)
             .build()
 
@@ -317,18 +342,36 @@ class FloatingBubbleService : Service() {
     }
 
     // ---------------------------------------------------------------------
-    // Tap bubble = TOGGLE: if overlay showing, hide it. Otherwise translate
-    // every visible text block (in parallel) and show each translation in
-    // place, over its own original position, as an individually draggable
-    // mini window.
+    // Preferences set from MainActivity: text size level and language mode.
+    // ---------------------------------------------------------------------
+    private fun textSizeScale(): Float {
+        val level = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getInt(PREF_TEXT_SIZE_LEVEL, 1)
+        return when (level) {
+            0 -> 0.85f  // small
+            2 -> 1.3f   // large
+            else -> 1f  // medium (default)
+        }
+    }
+
+    // null = auto-detect per block; true = force Arabic->English; false = force English->Arabic
+    private fun forcedLanguageDirection(): Boolean? {
+        return when (getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getInt(PREF_LANGUAGE_MODE, 0)) {
+            1 -> true
+            2 -> false
+            else -> null
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Tap bubble = TRANSLATE / REFRESH: always (re)translates what's
+    // currently visible, replacing any previous overlay. This makes it
+    // trivial to refresh after scrolling - just tap again. To hide the
+    // overlay without re-translating, use the "Hide" action in the
+    // notification; "Stop" there (or a long-press on the bubble) closes
+    // the bubble entirely.
     // ---------------------------------------------------------------------
 
     private fun onBubbleClicked() {
-        if (overlayIsShowing) {
-            removeWordOverlay()
-            setBubbleColor(COLOR_IDLE)
-            return
-        }
         if (isTranslating) {
             Toast.makeText(this, "Still translating\u2026", Toast.LENGTH_SHORT).show()
             return
@@ -351,13 +394,16 @@ class FloatingBubbleService : Service() {
         Toast.makeText(this, "Translating\u2026", Toast.LENGTH_SHORT).show()
 
         val limited = blocks.take(MAX_BLOCKS)
+        val forcedDirection = forcedLanguageDirection()
 
         serviceScope.launch {
-            // Each block's own text decides its own translation direction -
-            // see TranslatorHelper.translateBatch for why this matters on
+            // Each block's own text decides its own translation direction
+            // (unless the user forced one in settings) - see
+            // TranslatorHelper.translateBatch for why this matters on
             // mixed-language screens.
             val results = translatorHelper.translateBatch(
-                texts = limited.map { it.text }
+                texts = limited.map { it.text },
+                forcedDirection = forcedDirection
             )
 
             val translatedBlocks = limited.zip(results).mapNotNull { (block, result) ->
@@ -394,12 +440,13 @@ class FloatingBubbleService : Service() {
             WindowManager.LayoutParams.TYPE_PHONE
         }
 
+        val scale = textSizeScale()
         for ((block, translated) in items) {
             val label = TextView(this).apply {
                 text = translated
                 setTextColor(Color.BLACK)
                 setBackgroundColor(Color.WHITE) // Lens-style: covers the original word
-                textSize = autoTextSizeSp(translated)
+                textSize = autoTextSizeSp(translated) * scale
                 setPadding(6, 2, 6, 2)
                 maxLines = 4
             }
