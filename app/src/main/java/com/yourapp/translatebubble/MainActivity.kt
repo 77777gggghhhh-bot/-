@@ -93,6 +93,30 @@ class MainActivity : Activity() {
             startBubbleServiceIfReady()
         }
 
+        val bubblePrefs = getSharedPreferences("bubble_prefs", Context.MODE_PRIVATE)
+
+        val textSizeLabels = arrayOf("Small", "Medium", "Large")
+        lateinit var textSizeButton: Button
+        textSizeButton = styledButton(
+            "Text size: ${textSizeLabels[bubblePrefs.getInt("text_size_level", 1)]}",
+            accent = GitHubColors.SURFACE
+        ) {
+            val next = (bubblePrefs.getInt("text_size_level", 1) + 1) % 3
+            bubblePrefs.edit().putInt("text_size_level", next).apply()
+            textSizeButton.text = "Text size: ${textSizeLabels[next]}"
+        }
+
+        val languageLabels = arrayOf("Language: Auto-detect", "Language: Arabic \u2192 English", "Language: English \u2192 Arabic")
+        lateinit var languageButton: Button
+        languageButton = styledButton(
+            languageLabels[bubblePrefs.getInt("language_mode", 0)],
+            accent = GitHubColors.SURFACE
+        ) {
+            val next = (bubblePrefs.getInt("language_mode", 0) + 1) % 3
+            bubblePrefs.edit().putInt("language_mode", next).apply()
+            languageButton.text = languageLabels[next]
+        }
+
         root.addView(status, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
         ).apply { bottomMargin = 32 })
@@ -101,6 +125,10 @@ class MainActivity : Activity() {
         root.addView(accessibilityButton)
         root.addView(spacer())
         root.addView(startButton)
+        root.addView(spacer())
+        root.addView(textSizeButton)
+        root.addView(spacer())
+        root.addView(languageButton)
         setContentView(root)
 
         statusView = status
