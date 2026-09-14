@@ -31,4 +31,3 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.android.billingclient:billing-ktx:7.1.1")
 }
-grep -n "translateBatch" app/src/main/java/com/yourapp/translatebubble/TranslatorHelper.kt
