@@ -99,18 +99,6 @@ class FloatingBubbleService : Service() {
         addBubble()
         maybeRequestIgnoreBatteryOptimizations()
 
-        // Whenever the foreground screen changes, any translation overlay
-        // still showing was positioned for the old screen - clear it so it
-        // doesn't sit misplaced over the new one.
-        TranslationAccessibilityService.onScreenChanged = {
-            mainHandler.post {
-                if (overlayIsShowing) {
-                    removeWordOverlay()
-                    setBubbleColor(COLOR_IDLE)
-                }
-            }
-        }
-
         val filter = IntentFilter(ACTION_STOP)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             registerReceiver(stopReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
@@ -123,7 +111,6 @@ class FloatingBubbleService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         runCatching { unregisterReceiver(stopReceiver) }
-        TranslationAccessibilityService.onScreenChanged = null
         removeWordOverlay()
         bubbleView?.let { runCatching { windowManager.removeView(it) } }
         translatorHelper.close()
