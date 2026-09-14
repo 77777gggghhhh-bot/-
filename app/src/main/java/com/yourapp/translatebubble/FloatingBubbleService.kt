@@ -6,24 +6,28 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.BroadcastReceiver
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.provider.Settings
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
-import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
@@ -32,7 +36,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import kotlin.math.abs
 
 class FloatingBubbleService : Service() {
@@ -43,6 +46,9 @@ class FloatingBubbleService : Service() {
         private const val CLICK_DRAG_THRESHOLD = 12
         private const val LONG_PRESS_MS = 600L
         private const val MAX_BLOCKS = 60
+        private const val PREFS_NAME = "bubble_prefs"
+        private const val PREF_X = "bubble_x"
+        private const val PREF_Y = "bubble_y"
         const val ACTION_STOP = "com.yourapp.translatebubble.ACTION_STOP"
 
         // Bubble colors for each state, so the user can tell what's happening
@@ -56,7 +62,7 @@ class FloatingBubbleService : Service() {
     private var bubbleView: View? = null
     private lateinit var bubbleParams: WindowManager.LayoutParams
 
-    // Each translated block is now its OWN small overlay window positioned
+    // Each translated block is its OWN small overlay window positioned
     // exactly over the original text, so it can be dragged independently.
     private val translatedLabelViews = mutableListOf<Pair<View, WindowManager.LayoutParams>>()
 
@@ -91,6 +97,7 @@ class FloatingBubbleService : Service() {
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         startForegroundWithNotification()
         addBubble()
+        maybeRequestIgnoreBatteryOptimizations()
 
         val filter = IntentFilter(ACTION_STOP)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -148,6 +155,24 @@ class FloatingBubbleService : Service() {
     }
 
     // ---------------------------------------------------------------------
+    // Ask the system not to kill this service to save battery. Without
+    // this, aggressive battery managers can silently stop the bubble in
+    // the background. Requires the REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
+    // permission in the manifest. Safe to call repeatedly - it's a no-op
+    // once granted.
+    // ---------------------------------------------------------------------
+    private fun maybeRequestIgnoreBatteryOptimizations() {
+        val powerManager = getSystemService(POWER_SERVICE) as PowerManager
+        if (!powerManager.isIgnoringBatteryOptimizations(packageName)) {
+            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                data = Uri.parse("package:$packageName")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            runCatching { startActivity(intent) }
+        }
+    }
+
+    // ---------------------------------------------------------------------
     // Haptics: one short tick so the user feels the tap was registered.
     // ---------------------------------------------------------------------
     private fun vibrateTick() {
@@ -161,6 +186,22 @@ class FloatingBubbleService : Service() {
 
     private fun setBubbleColor(hex: String) {
         (bubbleView as? ImageView)?.setBackgroundColor(Color.parseColor(hex))
+    }
+
+    // ---------------------------------------------------------------------
+    // Remember where the bubble was left, so it reopens in the same spot
+    // instead of resetting to the top every time.
+    // ---------------------------------------------------------------------
+    private fun savedBubblePosition(): Pair<Int, Int> {
+        val prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
+        return prefs.getInt(PREF_X, 0) to prefs.getInt(PREF_Y, 300)
+    }
+
+    private fun saveBubblePosition(x: Int, y: Int) {
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit()
+            .putInt(PREF_X, x)
+            .putInt(PREF_Y, y)
+            .apply()
     }
 
     private fun addBubble() {
@@ -178,6 +219,7 @@ class FloatingBubbleService : Service() {
             WindowManager.LayoutParams.TYPE_PHONE
         }
 
+        val (savedX, savedY) = savedBubblePosition()
         bubbleParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -186,8 +228,8 @@ class FloatingBubbleService : Service() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            x = 0
-            y = 300
+            x = savedX
+            y = savedY
         }
 
         windowManager.addView(bubbleView, bubbleParams)
@@ -200,6 +242,7 @@ class FloatingBubbleService : Service() {
         var initialTouchX = 0f
         var initialTouchY = 0f
         var longPressTriggered = false
+        var wasDragged = false
         val longPressRunnable = Runnable {
             longPressTriggered = true
             onLongPressStop()
@@ -213,6 +256,7 @@ class FloatingBubbleService : Service() {
                     initialTouchX = event.rawX
                     initialTouchY = event.rawY
                     longPressTriggered = false
+                    wasDragged = false
                     mainHandler.postDelayed(longPressRunnable, LONG_PRESS_MS)
                     true
                 }
@@ -221,6 +265,7 @@ class FloatingBubbleService : Service() {
                     val dy = (event.rawY - initialTouchY).toInt()
                     if (abs(dx) > CLICK_DRAG_THRESHOLD || abs(dy) > CLICK_DRAG_THRESHOLD) {
                         mainHandler.removeCallbacks(longPressRunnable)
+                        wasDragged = true
                     }
                     bubbleParams.x = initialX + dx
                     bubbleParams.y = initialY + dy
@@ -236,8 +281,11 @@ class FloatingBubbleService : Service() {
                         if (isTap) {
                             vibrateTick() // feel the tap immediately, before any work happens
                             onBubbleClicked()
+                        } else if (wasDragged) {
+                            snapBubbleToNearestEdge()
                         }
                     }
+                    saveBubblePosition(bubbleParams.x, bubbleParams.y)
                     true
                 }
                 MotionEvent.ACTION_CANCEL -> {
@@ -249,6 +297,20 @@ class FloatingBubbleService : Service() {
         }
     }
 
+    // Snap the bubble to whichever screen edge (left/right) it's closer to,
+    // like Messenger's chat heads.
+    private fun snapBubbleToNearestEdge() {
+        val screenWidth = resources.displayMetrics.widthPixels
+        val bubbleWidth = bubbleView?.width?.takeIf { it > 0 } ?: dpToPx(56)
+        val bubbleCenter = bubbleParams.x + bubbleWidth / 2
+        bubbleParams.x = if (bubbleCenter < screenWidth / 2) {
+            0
+        } else {
+            screenWidth - bubbleWidth
+        }
+        runCatching { windowManager.updateViewLayout(bubbleView, bubbleParams) }
+    }
+
     private fun onLongPressStop() {
         removeWordOverlay()
         stopSelf()
@@ -256,8 +318,9 @@ class FloatingBubbleService : Service() {
 
     // ---------------------------------------------------------------------
     // Tap bubble = TOGGLE: if overlay showing, hide it. Otherwise translate
-    // every visible text block and show each translation in place, over its
-    // own original position, as an individually draggable mini window.
+    // every visible text block (in parallel) and show each translation in
+    // place, over its own original position, as an individually draggable
+    // mini window.
     // ---------------------------------------------------------------------
 
     private fun onBubbleClicked() {
@@ -292,15 +355,15 @@ class FloatingBubbleService : Service() {
         val arToEn = translatorHelper.looksArabic(sampleText)
 
         serviceScope.launch {
-            val translatedBlocks = mutableListOf<Pair<ScreenTextBlock, String>>()
-            withContext(Dispatchers.IO) {
-                for (block in limited) {
-                    val result = translatorHelper.translate(block.text, arabicToEnglish = arToEn)
-                    result.onSuccess { translated ->
-                        translatedBlocks.add(block to translated)
-                    }
-                }
+            val results = translatorHelper.translateBatch(
+                texts = limited.map { it.text },
+                arabicToEnglish = arToEn
+            )
+
+            val translatedBlocks = limited.zip(results).mapNotNull { (block, result) ->
+                result.getOrNull()?.let { translated -> block to translated }
             }
+
             isTranslating = false
             if (translatedBlocks.isEmpty()) {
                 Toast.makeText(this@FloatingBubbleService, "Translation failed", Toast.LENGTH_SHORT).show()
@@ -336,7 +399,7 @@ class FloatingBubbleService : Service() {
                 text = translated
                 setTextColor(Color.BLACK)
                 setBackgroundColor(Color.WHITE) // Lens-style: covers the original word
-                textSize = 12f
+                textSize = autoTextSizeSp(translated)
                 setPadding(6, 2, 6, 2)
                 maxLines = 4
             }
@@ -355,20 +418,34 @@ class FloatingBubbleService : Service() {
             }
 
             windowManager.addView(label, params)
-            attachLabelDragListener(label, params)
+            attachLabelTouchListener(label, params)
             translatedLabelViews.add(label to params)
         }
 
         overlayIsShowing = true
     }
 
-    // Simple drag-only listener for each translated label (no click action
-    // needed here — tapping the label just picks it up to move it).
-    private fun attachLabelDragListener(label: View, params: WindowManager.LayoutParams) {
+    // Shrink text a bit when the translation is noticeably longer than the
+    // original word/phrase would normally hold, so it's less likely to
+    // overflow or wrap excessively.
+    private fun autoTextSizeSp(translated: String): Float = when {
+        translated.length > 80 -> 9f
+        translated.length > 40 -> 10f
+        else -> 12f
+    }
+
+    // Drag to move an individual translated label, or long-press to copy
+    // its text to the clipboard.
+    private fun attachLabelTouchListener(label: TextView, params: WindowManager.LayoutParams) {
         var initialX = 0
         var initialY = 0
         var initialTouchX = 0f
         var initialTouchY = 0f
+        var longPressTriggered = false
+        val longPressRunnable = Runnable {
+            longPressTriggered = true
+            copyLabelText(label)
+        }
 
         label.setOnTouchListener { view, event ->
             when (event.action) {
@@ -377,17 +454,35 @@ class FloatingBubbleService : Service() {
                     initialY = params.y
                     initialTouchX = event.rawX
                     initialTouchY = event.rawY
+                    longPressTriggered = false
+                    mainHandler.postDelayed(longPressRunnable, LONG_PRESS_MS)
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    params.x = initialX + (event.rawX - initialTouchX).toInt()
-                    params.y = initialY + (event.rawY - initialTouchY).toInt()
+                    val dx = (event.rawX - initialTouchX).toInt()
+                    val dy = (event.rawY - initialTouchY).toInt()
+                    if (abs(dx) > CLICK_DRAG_THRESHOLD || abs(dy) > CLICK_DRAG_THRESHOLD) {
+                        mainHandler.removeCallbacks(longPressRunnable)
+                    }
+                    params.x = initialX + dx
+                    params.y = initialY + dy
                     runCatching { windowManager.updateViewLayout(view, params) }
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    mainHandler.removeCallbacks(longPressRunnable)
                     true
                 }
                 else -> false
             }
         }
+    }
+
+    private fun copyLabelText(label: TextView) {
+        vibrateTick()
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("Translation", label.text))
+        Toast.makeText(this, "Copied", Toast.LENGTH_SHORT).show()
     }
 
     private fun removeWordOverlay() {
