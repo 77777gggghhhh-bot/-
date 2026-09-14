@@ -3,6 +3,8 @@ package com.yourapp.translatebubble
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Settings
@@ -12,6 +14,19 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+
+// GitHub dark-theme palette
+private object GitHubColors {
+    const val BACKGROUND = "#0D1117"
+    const val SURFACE = "#161B22"
+    const val BORDER = "#30363D"
+    const val TEXT_PRIMARY = "#C9D1D9"
+    const val TEXT_SECONDARY = "#8B949E"
+    const val ACCENT_GREEN = "#238636"      // primary action buttons (like "Code")
+    const val ACCENT_GREEN_PRESSED = "#2EA043"
+    const val ACCENT_BLUE = "#58A6FF"       // links / info
+    const val DANGER_RED = "#F85149"
+}
 
 class MainActivity : Activity() {
 
@@ -27,25 +42,33 @@ class MainActivity : Activity() {
             val root = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(32, 96, 32, 32)
+                setBackgroundColor(Color.parseColor(GitHubColors.BACKGROUND))
             }
             val label = TextView(this).apply {
                 text = "Last crash:"
+                setTextColor(Color.parseColor(GitHubColors.TEXT_PRIMARY))
+                textSize = 16f
                 setPadding(0, 0, 0, 16)
             }
             val crashText = TextView(this).apply {
                 text = lastCrash
                 textSize = 11f
+                setTextColor(Color.parseColor(GitHubColors.TEXT_SECONDARY))
+                typeface = android.graphics.Typeface.MONOSPACE
             }
-            val scroll = ScrollView(this).apply { addView(crashText) }
-            val clearButton = Button(this).apply {
-                text = "Clear and continue"
-                setOnClickListener {
-                    prefs.edit().remove("last_crash").apply()
-                    recreate()
-                }
+            val scroll = ScrollView(this).apply {
+                addView(crashText)
+                setBackgroundColor(Color.parseColor(GitHubColors.SURFACE))
+                setPadding(24, 24, 24, 24)
+            }
+            val clearButton = styledButton("Clear and continue", accent = GitHubColors.DANGER_RED) {
+                prefs.edit().remove("last_crash").apply()
+                recreate()
             }
             root.addView(label)
-            root.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+            root.addView(scroll, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f).apply {
+                bottomMargin = 24
+            })
             root.addView(clearButton)
             setContentView(root)
             return
@@ -54,25 +77,29 @@ class MainActivity : Activity() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(48, 96, 48, 48)
+            setBackgroundColor(Color.parseColor(GitHubColors.BACKGROUND))
         }
 
-        val status = TextView(this)
-        val overlayButton = Button(this).apply {
-            text = "1. Grant Overlay Permission"
-            setOnClickListener { requestOverlayPermission() }
-        }
-        val accessibilityButton = Button(this).apply {
-            text = "2. Enable Accessibility Service"
-            setOnClickListener { openAccessibilitySettings() }
-        }
-        val startButton = Button(this).apply {
-            text = "3. Start Floating Bubble"
-            setOnClickListener { startBubbleServiceIfReady() }
+        val status = TextView(this).apply {
+            setTextColor(Color.parseColor(GitHubColors.TEXT_PRIMARY))
+            textSize = 14f
+            setPadding(24, 24, 24, 24)
+            setBackgroundColor(Color.parseColor(GitHubColors.SURFACE))
         }
 
-        root.addView(status)
+        val overlayButton = styledButton("1. Grant Overlay Permission") { requestOverlayPermission() }
+        val accessibilityButton = styledButton("2. Enable Accessibility Service") { openAccessibilitySettings() }
+        val startButton = styledButton("3. Start Floating Bubble", accent = GitHubColors.ACCENT_GREEN) {
+            startBubbleServiceIfReady()
+        }
+
+        root.addView(status, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { bottomMargin = 32 })
         root.addView(overlayButton)
+        root.addView(spacer())
         root.addView(accessibilityButton)
+        root.addView(spacer())
         root.addView(startButton)
         setContentView(root)
 
@@ -83,6 +110,37 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         if (::statusView.isInitialized) refreshStatus()
+    }
+
+    // ---------------------------------------------------------------------
+    // GitHub-style button: rounded corners, dark border, green accent for
+    // primary actions - matches github.com's "Code" / "Merge" button look.
+    // ---------------------------------------------------------------------
+    private fun styledButton(
+        label: String,
+        accent: String = GitHubColors.ACCENT_GREEN,
+        onClick: () -> Unit
+    ): Button {
+        return Button(this).apply {
+            text = label
+            isAllCaps = false
+            textSize = 15f
+            setTextColor(Color.WHITE)
+            setPadding(32, 24, 32, 24)
+            background = GradientDrawable().apply {
+                cornerRadius = 24f
+                setColor(Color.parseColor(accent))
+                setStroke(2, Color.parseColor(GitHubColors.BORDER))
+            }
+            stateListAnimator = null // flat, GitHub-style (no default Material elevation shadow)
+            setOnClickListener { onClick() }
+        }
+    }
+
+    private fun spacer(): android.view.View = android.view.View(this).apply {
+        layoutParams = LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, 20
+        )
     }
 
     private fun refreshStatus() {
