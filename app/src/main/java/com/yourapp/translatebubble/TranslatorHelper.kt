@@ -4,6 +4,11 @@ import com.google.mlkit.common.model.DownloadConditions
 import com.google.mlkit.nl.translate.Translation
 import com.google.mlkit.nl.translate.Translator
 import com.google.mlkit.nl.translate.TranslatorOptions
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
@@ -37,11 +42,36 @@ class TranslatorHelper {
         }
     }
 
+    // ---------------------------------------------------------------------
+    // Translate many blocks at once, a few at a time in parallel, instead
+    // of one-by-one. Much faster when a screen has lots of text blocks.
+    // The model only needs to download once (first call); the rest reuse
+    // the cached model instantly.
+    // ---------------------------------------------------------------------
+    suspend fun translateBatch(
+        texts: List<String>,
+        arabicToEnglish: Boolean,
+        maxConcurrent: Int = 4
+    ): List<Result<String>> = coroutineScope {
+        // Make sure the model is ready before firing off concurrent calls.
+        val translator = if (arabicToEnglish) arToEn else enToAr
+        ensureModelDownloaded(translator)
+
+        val semaphore = Semaphore(maxConcurrent)
+        texts.map { text ->
+            async {
+                semaphore.withPermit {
+                    translate(text, arabicToEnglish)
+                }
+            }
+        }.awaitAll()
+    }
+
     private suspend fun ensureModelDownloaded(translator: Translator) =
         suspendCancellableCoroutine<Unit> { cont ->
-            val conditions = DownloadConditions.Builder()
-                .requireWifi()
-                .build()
+            // No longer requires Wi-Fi: on mobile data the model still
+            // downloads (once, then cached), instead of silently failing.
+            val conditions = DownloadConditions.Builder().build()
             translator.downloadModelIfNeeded(conditions)
                 .addOnSuccessListener { cont.resume(Unit) }
                 .addOnFailureListener { e -> cont.resumeWithException(e) }
