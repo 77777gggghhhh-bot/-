@@ -45,23 +45,25 @@ class TranslatorHelper {
     // ---------------------------------------------------------------------
     // Translate many blocks at once, a few at a time in parallel, instead
     // of one-by-one. Much faster when a screen has lots of text blocks.
-    // The model only needs to download once (first call); the rest reuse
-    // the cached model instantly.
+    //
+    // IMPORTANT: direction is decided PER BLOCK, not once for the whole
+    // screen. A screen that's mostly English with a little Arabic (or vice
+    // versa) used to pick ONE direction for everything just because a
+    // single stray character of the other language showed up somewhere in
+    // the combined text - so blocks that were already in the "wrong"
+    // direction just passed through unchanged, making it look like
+    // everything got translated into one language. Now each block's own
+    // text decides its own direction.
     // ---------------------------------------------------------------------
     suspend fun translateBatch(
         texts: List<String>,
-        arabicToEnglish: Boolean,
         maxConcurrent: Int = 4
     ): List<Result<String>> = coroutineScope {
-        // Make sure the model is ready before firing off concurrent calls.
-        val translator = if (arabicToEnglish) arToEn else enToAr
-        ensureModelDownloaded(translator)
-
         val semaphore = Semaphore(maxConcurrent)
         texts.map { text ->
             async {
                 semaphore.withPermit {
-                    translate(text, arabicToEnglish)
+                    translate(text, arabicToEnglish = isArabicDominant(text))
                 }
             }
         }.awaitAll()
@@ -84,8 +86,27 @@ class TranslatorHelper {
                 .addOnFailureListener { e -> cont.resumeWithException(e) }
         }
 
+    // Old check: true if the text contains ANY Arabic character at all.
+    // Kept for compatibility, but prefer isArabicDominant() below for
+    // deciding translation direction - "any" is too easily tripped by a
+    // single stray character (an emoji-adjacent mark, a name, etc.).
     fun looksArabic(text: String): Boolean {
         return text.any { it.code in 0x0600..0x06FF }
+    }
+
+    // True if Arabic letters outnumber Latin letters in this specific
+    // piece of text. This is what should decide translation direction,
+    // block by block - never for a whole screen's text combined.
+    fun isArabicDominant(text: String): Boolean {
+        var arabicCount = 0
+        var latinCount = 0
+        for (ch in text) {
+            when {
+                ch.code in 0x0600..0x06FF -> arabicCount++
+                ch.isLetter() && ch.code < 0x0250 -> latinCount++
+            }
+        }
+        return arabicCount > latinCount
     }
 
     fun close() {
