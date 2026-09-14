@@ -16,12 +16,6 @@ class TranslationAccessibilityService : AccessibilityService() {
     companion object {
         var instance: TranslationAccessibilityService? = null
             private set
-
-        // Fired whenever the foreground screen/app changes, so whoever is
-        // showing a translation overlay (the bubble service) knows to
-        // clear it - an overlay positioned for the previous screen would
-        // otherwise sit in the wrong place over the new one.
-        var onScreenChanged: (() -> Unit)? = null
     }
 
     private fun log(message: String) {
@@ -48,11 +42,7 @@ class TranslationAccessibilityService : AccessibilityService() {
         log("Service INTERRUPTED")
     }
 
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-            onScreenChanged?.invoke()
-        }
-    }
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
 
     fun extractVisibleText(): List<ScreenTextBlock> {
         val root = rootInActiveWindow ?: return emptyList()
