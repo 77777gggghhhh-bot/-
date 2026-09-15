@@ -33,7 +33,7 @@
         </activity>
 
         <service
-            android:name=".FloatingBubbleService"
+            android:name=".FloatingBubbleService"ف
             android:exported="false"
             android:foregroundServiceType="specialUse">
             <property
