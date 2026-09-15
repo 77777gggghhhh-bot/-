@@ -11,6 +11,7 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.net.Uri
@@ -36,6 +37,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
 import kotlin.math.abs
 
 class FloatingBubbleService : Service() {
@@ -336,6 +339,54 @@ class FloatingBubbleService : Service() {
         runCatching { windowManager.updateViewLayout(bubbleView, bubbleParams) }
     }
 
+    // ---------------------------------------------------------------------
+    // Blend-in backgrounds: capture the screen once per translate, then
+    // sample the real pixel color behind each text block instead of using
+    // a flat white box. This is what makes the translation look like it
+    // replaced the original word in place (Google Lens-style) rather than
+    // sitting in an obvious rectangle.
+    // ---------------------------------------------------------------------
+    private suspend fun captureScreenshotOrNull(
+        accessibilityService: TranslationAccessibilityService
+    ): Bitmap? = suspendCancellableCoroutine { cont ->
+        accessibilityService.captureScreenshot { bitmap ->
+            if (cont.isActive) cont.resume(bitmap)
+        }
+    }
+
+    private fun sampleBackgroundColor(bitmap: Bitmap?, bounds: android.graphics.Rect): Int {
+        if (bitmap == null) return Color.WHITE
+        val left = bounds.left.coerceIn(0, bitmap.width - 1)
+        val top = bounds.top.coerceIn(0, bitmap.height - 1)
+        val right = bounds.right.coerceIn(left + 1, bitmap.width)
+        val bottom = bounds.bottom.coerceIn(top + 1, bitmap.height)
+
+        var rSum = 0L
+        var gSum = 0L
+        var bSum = 0L
+        var count = 0
+        // Sample the edge pixels of the block (the surrounding background),
+        // stepping a few pixels at a time for speed - we don't need every
+        // pixel, just a good average.
+        val step = 4
+        var x = left
+        while (x < right) {
+            rSum += Color.red(bitmap.getPixel(x, top)); gSum += Color.green(bitmap.getPixel(x, top)); bSum += Color.blue(bitmap.getPixel(x, top)); count++
+            x += step
+        }
+        if (count == 0) return Color.WHITE
+        return Color.rgb((rSum / count).toInt(), (gSum / count).toInt(), (bSum / count).toInt())
+    }
+
+    // Pick black or white text for readable contrast against a sampled
+    // background color (standard relative-luminance check).
+    private fun readableTextColorFor(backgroundColor: Int): Int {
+        val luminance = (0.299 * Color.red(backgroundColor) +
+            0.587 * Color.green(backgroundColor) +
+            0.114 * Color.blue(backgroundColor)) / 255
+        return if (luminance > 0.6) Color.BLACK else Color.WHITE
+    }
+
     private fun onLongPressStop() {
         removeWordOverlay()
         stopSelf()
@@ -397,6 +448,10 @@ class FloatingBubbleService : Service() {
         val forcedDirection = forcedLanguageDirection()
 
         serviceScope.launch {
+            // Capture the screen once now (before any overlay is drawn on
+            // top of it) so we can sample real background colors per block.
+            val screenshot = captureScreenshotOrNull(accessibilityService)
+
             // Each block's own text decides its own translation direction
             // (unless the user forced one in settings) - see
             // TranslatorHelper.translateBatch for why this matters on
@@ -415,7 +470,7 @@ class FloatingBubbleService : Service() {
                 Toast.makeText(this@FloatingBubbleService, "Translation failed", Toast.LENGTH_SHORT).show()
                 setBubbleColor(COLOR_IDLE)
             } else {
-                showWordOverlay(translatedBlocks)
+                showWordOverlay(translatedBlocks, screenshot)
                 setBubbleColor(COLOR_ACTIVE)
             }
         }
@@ -423,14 +478,15 @@ class FloatingBubbleService : Service() {
 
     // ---------------------------------------------------------------------
     // In-place overlay: one small independent window PER translated block,
-    // placed exactly over that block's original position with a white
-    // background (like Google Lens), and individually draggable. Because
-    // each window only covers its own text (not the full screen), the
-    // empty space between them is untouched and taps still reach the app
-    // underneath normally.
+    // placed exactly over that block's original position with a background
+    // color sampled from the real screen behind it (so it blends in like
+    // Google Lens, not a plain white box), and individually draggable.
+    // Because each window only covers its own text (not the full screen),
+    // the empty space between them is untouched and taps still reach the
+    // app underneath normally.
     // ---------------------------------------------------------------------
 
-    private fun showWordOverlay(items: List<Pair<ScreenTextBlock, String>>) {
+    private fun showWordOverlay(items: List<Pair<ScreenTextBlock, String>>, screenshot: Bitmap?) {
         removeWordOverlay()
 
         val overlayType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -442,10 +498,11 @@ class FloatingBubbleService : Service() {
 
         val scale = textSizeScale()
         for ((block, translated) in items) {
+            val backgroundColor = sampleBackgroundColor(screenshot, block.bounds)
             val label = TextView(this).apply {
                 text = translated
-                setTextColor(Color.BLACK)
-                setBackgroundColor(Color.WHITE) // Lens-style: covers the original word
+                setTextColor(readableTextColorFor(backgroundColor))
+                setBackgroundColor(backgroundColor) // blends into the real background instead of a plain white box
                 textSize = autoTextSizeSp(translated) * scale
                 setPadding(6, 2, 6, 2)
                 maxLines = 4
