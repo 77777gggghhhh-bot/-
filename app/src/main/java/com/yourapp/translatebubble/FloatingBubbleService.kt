@@ -38,6 +38,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
 import kotlin.math.abs
 
@@ -171,7 +172,7 @@ class FloatingBubbleService : Service() {
 
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Translate Bubble is running")
-            .setContentText("Tap bubble to translate/refresh. Hide clears the overlay; Stop closes the bubble.")
+            .setContentText("Tap bubble to translate; tap again to hide. Stop closes the bubble.")
             .setSmallIcon(android.R.drawable.ic_menu_view)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_MIN)
@@ -414,15 +415,20 @@ class FloatingBubbleService : Service() {
     }
 
     // ---------------------------------------------------------------------
-    // Tap bubble = TRANSLATE / REFRESH: always (re)translates what's
-    // currently visible, replacing any previous overlay. This makes it
-    // trivial to refresh after scrolling - just tap again. To hide the
-    // overlay without re-translating, use the "Hide" action in the
-    // notification; "Stop" there (or a long-press on the bubble) closes
-    // the bubble entirely.
+    // Tap bubble = TOGGLE: if a translation is already showing, hide it
+    // (this is how you manually stop a translation). Otherwise translate
+    // what's currently visible. If the accessibility service has been
+    // killed by the OS in the background (common on some phone brands),
+    // jump straight to the Accessibility settings screen instead of just
+    // showing a toast, since re-enabling it there is the actual fix.
     // ---------------------------------------------------------------------
 
     private fun onBubbleClicked() {
+        if (overlayIsShowing) {
+            removeWordOverlay()
+            setBubbleColor(COLOR_IDLE)
+            return
+        }
         if (isTranslating) {
             Toast.makeText(this, "Still translating\u2026", Toast.LENGTH_SHORT).show()
             return
@@ -430,7 +436,14 @@ class FloatingBubbleService : Service() {
 
         val accessibilityService = TranslationAccessibilityService.instance
         if (accessibilityService == null) {
-            Toast.makeText(this, "Enable the accessibility service first", Toast.LENGTH_SHORT).show()
+            Toast.makeText(
+                this,
+                "Accessibility service was turned off (often by battery settings) - re-enabling it now",
+                Toast.LENGTH_LONG
+            ).show()
+            startActivity(
+                Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
             return
         }
 
@@ -448,30 +461,48 @@ class FloatingBubbleService : Service() {
         val forcedDirection = forcedLanguageDirection()
 
         serviceScope.launch {
-            // Capture the screen once now (before any overlay is drawn on
-            // top of it) so we can sample real background colors per block.
-            val screenshot = captureScreenshotOrNull(accessibilityService)
+            // A hard ceiling on the whole translate flow: if anything hangs
+            // (screenshot capture is known to occasionally never call back
+            // on some devices, or ML Kit stalls), this guarantees the
+            // bubble comes back to a usable state instead of getting stuck
+            // showing "Translating..." forever.
+            val didShow = withTimeoutOrNull(20_000L) {
+                // Capture the screen once now (before any overlay is drawn
+                // on top of it) so we can sample real background colors
+                // per block. Its own short timeout protects against the
+                // screenshot callback never firing.
+                val screenshot = withTimeoutOrNull(2_000L) {
+                    captureScreenshotOrNull(accessibilityService)
+                }
 
-            // Each block's own text decides its own translation direction
-            // (unless the user forced one in settings) - see
-            // TranslatorHelper.translateBatch for why this matters on
-            // mixed-language screens.
-            val results = translatorHelper.translateBatch(
-                texts = limited.map { it.text },
-                forcedDirection = forcedDirection
-            )
+                // Each block's own text decides its own translation
+                // direction (unless the user forced one in settings) - see
+                // TranslatorHelper.translateBatch for why this matters on
+                // mixed-language screens.
+                val results = translatorHelper.translateBatch(
+                    texts = limited.map { it.text },
+                    forcedDirection = forcedDirection
+                )
 
-            val translatedBlocks = limited.zip(results).mapNotNull { (block, result) ->
-                result.getOrNull()?.let { translated -> block to translated }
+                val translatedBlocks = limited.zip(results).mapNotNull { (block, result) ->
+                    result.getOrNull()?.let { translated -> block to translated }
+                }
+
+                if (translatedBlocks.isNotEmpty()) {
+                    showWordOverlay(translatedBlocks, screenshot)
+                    true
+                } else {
+                    false
+                }
             }
 
             isTranslating = false
-            if (translatedBlocks.isEmpty()) {
-                Toast.makeText(this@FloatingBubbleService, "Translation failed", Toast.LENGTH_SHORT).show()
-                setBubbleColor(COLOR_IDLE)
-            } else {
-                showWordOverlay(translatedBlocks, screenshot)
+            if (didShow == true) {
                 setBubbleColor(COLOR_ACTIVE)
+            } else {
+                val message = if (didShow == null) "Translation timed out" else "Translation failed"
+                Toast.makeText(this@FloatingBubbleService, message, Toast.LENGTH_SHORT).show()
+                setBubbleColor(COLOR_IDLE)
             }
         }
     }
