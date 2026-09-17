@@ -528,20 +528,27 @@ class FloatingBubbleService : Service() {
         }
 
         val scale = textSizeScale()
+        val screenWidth = resources.displayMetrics.widthPixels
         for ((block, translated) in items) {
             val backgroundColor = sampleBackgroundColor(screenshot, block.bounds)
+            // Cap width by remaining screen space from this block's left
+            // edge, not by the original element's width - a narrow icon
+            // button's original bounds are often much narrower than its
+            // Arabic translation, and forcing that width makes the text
+            // wrap into an ugly single-letter-per-line vertical stack.
+            val maxWidth = (screenWidth - block.bounds.left - dpToPx(8)).coerceAtLeast(dpToPx(60))
             val label = TextView(this).apply {
                 text = translated
                 setTextColor(readableTextColorFor(backgroundColor))
                 setBackgroundColor(backgroundColor) // blends into the real background instead of a plain white box
                 textSize = autoTextSizeSp(translated) * scale
-                setPadding(6, 2, 6, 2)
-                maxLines = 4
+                setPadding(10, 4, 10, 4)
+                maxLines = 2
+                this.maxWidth = maxWidth
             }
 
-            val width = block.bounds.width().coerceAtLeast(dpToPx(20))
             val params = WindowManager.LayoutParams(
-                width,
+                WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 overlayType,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
