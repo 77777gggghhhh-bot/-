@@ -95,6 +95,9 @@ class MainActivity : Activity() {
         val autoStartButton = styledButton("4. Allow Auto-start / Background", accent = GitHubColors.ACCENT_BLUE) {
             openAutoStartSettings()
         }
+        val shareButton = styledButton("Share with friends", accent = GitHubColors.ACCENT_BLUE) {
+            shareApp()
+        }
 
         val bubblePrefs = getSharedPreferences("bubble_prefs", Context.MODE_PRIVATE)
 
@@ -130,6 +133,8 @@ class MainActivity : Activity() {
         root.addView(startButton)
         root.addView(spacer())
         root.addView(autoStartButton)
+        root.addView(spacer())
+        root.addView(shareButton)
         root.addView(spacer())
         root.addView(textSizeButton)
         root.addView(spacer())
@@ -197,6 +202,23 @@ class MainActivity : Activity() {
 
     private fun openAccessibilitySettings() {
         startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+    }
+
+    // ---------------------------------------------------------------------
+    // Share the app with friends via the normal Android share sheet
+    // (WhatsApp, Telegram, SMS, etc.). Since this isn't on the Play Store,
+    // we share the direct download link to the latest built APK - the
+    // build workflow always publishes it at this same "latest-build"
+    // release, so the link never goes stale between builds.
+    // ---------------------------------------------------------------------
+    private fun shareApp() {
+        val downloadUrl = "https://github.com/77777gggghhhh-bot/-/releases/download/latest-build/app-debug.apk"
+        val message = "جرب تطبيق ترجمة فقاعة - يترجم أي شاشة فورًا!\n$downloadUrl"
+        val intent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_TEXT, message)
+        }
+        startActivity(Intent.createChooser(intent, "Share Translate Bubble"))
     }
 
     // ---------------------------------------------------------------------
