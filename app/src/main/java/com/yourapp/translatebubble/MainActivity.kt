@@ -92,6 +92,9 @@ class MainActivity : Activity() {
         val startButton = styledButton("3. Start Floating Bubble", accent = GitHubColors.ACCENT_GREEN) {
             startBubbleServiceIfReady()
         }
+        val autoStartButton = styledButton("4. Allow Auto-start / Background", accent = GitHubColors.ACCENT_BLUE) {
+            openAutoStartSettings()
+        }
 
         val bubblePrefs = getSharedPreferences("bubble_prefs", Context.MODE_PRIVATE)
 
@@ -125,6 +128,8 @@ class MainActivity : Activity() {
         root.addView(accessibilityButton)
         root.addView(spacer())
         root.addView(startButton)
+        root.addView(spacer())
+        root.addView(autoStartButton)
         root.addView(spacer())
         root.addView(textSizeButton)
         root.addView(spacer())
@@ -192,6 +197,73 @@ class MainActivity : Activity() {
 
     private fun openAccessibilitySettings() {
         startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+    }
+
+    // ---------------------------------------------------------------------
+    // Many Chinese Android brands (Oppo/ColorOS, Xiaomi/MIUI, Vivo, Huawei)
+    // have their own extra "Auto-start" / background-activity permission
+    // screen beyond stock Android's battery optimization setting - without
+    // it, the system silently kills background services like ours. There's
+    // no single official API for this, so we try each known manufacturer
+    // screen and fall back to the app's own settings page if none exist on
+    // this device/ROM version.
+    // ---------------------------------------------------------------------
+    private fun openAutoStartSettings() {
+        val manufacturer = android.os.Build.MANUFACTURER.lowercase()
+        val candidates = when {
+            manufacturer.contains("oppo") -> listOf(
+                "com.coloros.safecenter" to "com.coloros.safecenter.permission.startup.StartupAppListActivity",
+                "com.coloros.safecenter" to "com.coloros.safecenter.startupapp.StartupAppListActivity"
+            )
+            manufacturer.contains("xiaomi") -> listOf(
+                "com.miui.securitycenter" to "com.miui.permcenter.autostart.AutoStartManagementActivity"
+            )
+            manufacturer.contains("vivo") -> listOf(
+                "com.vivo.permissionmanager" to "com.vivo.permissionmanager.activity.BgStartUpManagerActivity",
+                "com.iqoo.secure" to "com.iqoo.secure.ui.phoneoptimize.AddWhiteListActivity"
+            )
+            manufacturer.contains("huawei") || manufacturer.contains("honor") -> listOf(
+                "com.huawei.systemmanager" to "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity"
+            )
+            else -> emptyList()
+        }
+
+        for ((pkg, cls) in candidates) {
+            try {
+                val intent = Intent().apply {
+                    component = android.content.ComponentName(pkg, cls)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                startActivity(intent)
+                Toast.makeText(
+                    this,
+                    "Find \"Translate Bubble\" in this list and allow it",
+                    Toast.LENGTH_LONG
+                ).show()
+                return
+            } catch (e: Exception) {
+                // Try the next known screen for this manufacturer.
+            }
+        }
+
+        // No matching OEM screen (or a brand without one, e.g. Samsung/Pixel):
+        // fall back to this app's own settings page, plus the standard
+        // battery-optimization exemption prompt.
+        try {
+            startActivity(
+                Intent(
+                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.parse("package:$packageName")
+                ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+            Toast.makeText(
+                this,
+                "Look for \"Battery\" or \"Auto-start\" in this app's settings and allow background activity",
+                Toast.LENGTH_LONG
+            ).show()
+        } catch (e: Exception) {
+            Toast.makeText(this, "Couldn't open settings on this device", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun isAccessibilityServiceEnabled(): Boolean {
