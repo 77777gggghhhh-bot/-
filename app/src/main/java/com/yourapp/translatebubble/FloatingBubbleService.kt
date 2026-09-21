@@ -33,6 +33,9 @@ import android.widget.ImageView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -355,6 +358,47 @@ class FloatingBubbleService : Service() {
         }
     }
 
+    // ---------------------------------------------------------------------
+    // OCR on the captured screenshot: this is what lets the app translate
+    // text baked into images and video frames (memes, screenshots inside
+    // an app, etc.) - Accessibility only ever sees text that's a real UI
+    // element/label, never pixels drawn inside an image. Latin-script only
+    // (ML Kit has no Arabic OCR model), which covers the common case of
+    // English meme text needing translation.
+    // ---------------------------------------------------------------------
+    private suspend fun runOcr(bitmap: Bitmap): List<ScreenTextBlock> =
+        suspendCancellableCoroutine { cont ->
+            try {
+                val recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS)
+                val image = InputImage.fromBitmap(bitmap, 0)
+                recognizer.process(image)
+                    .addOnSuccessListener { visionText ->
+                        val blocks = mutableListOf<ScreenTextBlock>()
+                        for (block in visionText.textBlocks) {
+                            val text = block.text.trim()
+                            val bounds = block.boundingBox
+                            if (text.isNotEmpty() && bounds != null && !bounds.isEmpty) {
+                                blocks.add(ScreenTextBlock(text, bounds))
+                            }
+                        }
+                        if (cont.isActive) cont.resume(blocks)
+                    }
+                    .addOnFailureListener {
+                        if (cont.isActive) cont.resume(emptyList())
+                    }
+            } catch (e: Exception) {
+                if (cont.isActive) cont.resume(emptyList())
+            }
+        }
+
+    // Skip blocks that are just a bare number (like counts, "572" or "20K")
+    // - translating a number alone produces meaningless output; it's not
+    // actually a word to translate.
+    private fun isLikelyJunkNumber(text: String): Boolean {
+        val cleaned = text.trim()
+        return cleaned.matches(Regex("^[0-9\u0660-\u0669.,٬]+[KkMmبمألف]?$"))
+    }
+
     private fun sampleBackgroundColor(bitmap: Bitmap?, bounds: android.graphics.Rect): Int {
         if (bitmap == null) return Color.WHITE
         val left = bounds.left.coerceIn(0, bitmap.width - 1)
@@ -447,17 +491,12 @@ class FloatingBubbleService : Service() {
             return
         }
 
-        val blocks = accessibilityService.extractVisibleText()
-        if (blocks.isEmpty()) {
-            Toast.makeText(this, "No visible text found on screen", Toast.LENGTH_SHORT).show()
-            return
-        }
+        val accessibilityBlocks = accessibilityService.extractVisibleText()
 
         isTranslating = true
         setBubbleColor(COLOR_TRANSLATING)
         Toast.makeText(this, "Translating\u2026", Toast.LENGTH_SHORT).show()
 
-        val limited = blocks.take(MAX_BLOCKS)
         val forcedDirection = forcedLanguageDirection()
 
         serviceScope.launch {
@@ -466,13 +505,26 @@ class FloatingBubbleService : Service() {
             // on some devices, or ML Kit stalls), this guarantees the
             // bubble comes back to a usable state instead of getting stuck
             // showing "Translating..." forever.
-            val didShow = withTimeoutOrNull(20_000L) {
+            val didShow = withTimeoutOrNull(25_000L) {
                 // Capture the screen once now (before any overlay is drawn
-                // on top of it) so we can sample real background colors
-                // per block. Its own short timeout protects against the
-                // screenshot callback never firing.
+                // on top of it) - used both to sample real background
+                // colors per block AND to OCR text baked into images/video
+                // (memes, etc.) that Accessibility can never see, since
+                // that text isn't a real UI element, just pixels.
                 val screenshot = withTimeoutOrNull(2_000L) {
                     captureScreenshotOrNull(accessibilityService)
+                }
+
+                val ocrBlocks = screenshot?.let {
+                    withTimeoutOrNull(6_000L) { runOcr(it) }
+                } ?: emptyList()
+
+                val limited = (accessibilityBlocks + ocrBlocks)
+                    .filterNot { isLikelyJunkNumber(it.text) }
+                    .take(MAX_BLOCKS)
+
+                if (limited.isEmpty()) {
+                    return@withTimeoutOrNull false
                 }
 
                 // Each block's own text decides its own translation
