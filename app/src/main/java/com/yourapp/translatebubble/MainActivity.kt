@@ -31,6 +31,7 @@ private object GitHubColors {
 class MainActivity : Activity() {
 
     private lateinit var statusView: TextView
+    private lateinit var primaryButton: Button
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -87,12 +88,22 @@ class MainActivity : Activity() {
             setBackgroundColor(Color.parseColor(GitHubColors.SURFACE))
         }
 
-        val overlayButton = styledButton("1. Grant Overlay Permission") { requestOverlayPermission() }
-        val accessibilityButton = styledButton("2. Enable Accessibility Service") { openAccessibilitySettings() }
-        val startButton = styledButton("3. Start Floating Bubble", accent = GitHubColors.ACCENT_GREEN) {
-            startBubbleServiceIfReady()
+        // ---------------------------------------------------------------
+        // ONE primary button that always shows just the next required
+        // step, instead of 3 separate buttons the person has to figure
+        // out the order of. Its label and action update automatically in
+        // refreshStatus() as each permission gets granted.
+        // ---------------------------------------------------------------
+        val setupButton = styledButton("Get Started", accent = GitHubColors.ACCENT_GREEN) {
+            when {
+                !Settings.canDrawOverlays(this) -> requestOverlayPermission()
+                !isAccessibilityServiceEnabled() -> openAccessibilitySettings()
+                else -> startBubbleServiceIfReady()
+            }
         }
-        val autoStartButton = styledButton("4. Allow Auto-start / Background", accent = GitHubColors.ACCENT_BLUE) {
+        primaryButton = setupButton
+
+        val autoStartButton = styledButton("Allow Auto-start / Background (recommended)", accent = GitHubColors.ACCENT_BLUE) {
             openAutoStartSettings()
         }
         val shareButton = styledButton("Share with friends", accent = GitHubColors.ACCENT_BLUE) {
@@ -126,11 +137,7 @@ class MainActivity : Activity() {
         root.addView(status, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT
         ).apply { bottomMargin = 32 })
-        root.addView(overlayButton)
-        root.addView(spacer())
-        root.addView(accessibilityButton)
-        root.addView(spacer())
-        root.addView(startButton)
+        root.addView(setupButton)
         root.addView(spacer())
         root.addView(autoStartButton)
         root.addView(spacer())
@@ -186,6 +193,20 @@ class MainActivity : Activity() {
         val accessibilityGranted = isAccessibilityServiceEnabled()
         statusView.text = "Overlay permission: ${if (overlayGranted) "OK" else "NO"}\n" +
             "Accessibility service: ${if (accessibilityGranted) "OK" else "NO"}"
+
+        if (::primaryButton.isInitialized) {
+            when {
+                !overlayGranted -> {
+                    primaryButton.text = "Get Started - Step 1 of 2: Allow Overlay"
+                }
+                !accessibilityGranted -> {
+                    primaryButton.text = "Step 2 of 2: Enable Accessibility"
+                }
+                else -> {
+                    primaryButton.text = "Start Floating Bubble"
+                }
+            }
+        }
     }
 
     private fun requestOverlayPermission() {
