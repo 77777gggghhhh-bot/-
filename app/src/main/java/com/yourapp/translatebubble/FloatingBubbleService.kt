@@ -41,6 +41,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
 import kotlin.math.abs
@@ -491,8 +492,6 @@ class FloatingBubbleService : Service() {
             return
         }
 
-        val accessibilityBlocks = accessibilityService.extractVisibleText()
-
         isTranslating = true
         setBubbleColor(COLOR_TRANSLATING)
         Toast.makeText(this, "Translating\u2026", Toast.LENGTH_SHORT).show()
@@ -506,6 +505,16 @@ class FloatingBubbleService : Service() {
             // bubble comes back to a usable state instead of getting stuck
             // showing "Translating..." forever.
             val didShow = withTimeoutOrNull(25_000L) {
+                // Walk the accessibility tree off the main thread. On a
+                // busy screen (lots of UI elements, e.g. social media
+                // apps) this can take a noticeable moment, and doing it on
+                // the main thread was blocking the whole app - and
+                // occasionally made Android flag the accessibility
+                // service as unresponsive and silently turn it off.
+                val accessibilityBlocks = withContext(Dispatchers.Default) {
+                    accessibilityService.extractVisibleText()
+                }
+
                 // Capture the screen once now (before any overlay is drawn
                 // on top of it) - used both to sample real background
                 // colors per block AND to OCR text baked into images/video
