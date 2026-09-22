@@ -53,7 +53,7 @@ class FloatingBubbleService : Service() {
         private const val NOTIF_ID = 1001
         private const val CLICK_DRAG_THRESHOLD = 12
         private const val LONG_PRESS_MS = 600L
-        private const val MAX_BLOCKS = 60
+        private const val MAX_BLOCKS = 80
         private const val PREFS_NAME = "bubble_prefs"
         private const val PREF_X = "bubble_x"
         private const val PREF_Y = "bubble_y"
@@ -400,6 +400,47 @@ class FloatingBubbleService : Service() {
         return cleaned.matches(Regex("^[0-9\u0660-\u0669.,٬]+[KkMmبمألف]?$"))
     }
 
+    // Skip tiny icon-sized elements (like toolbar icon labels: "Edit",
+    // "Copy", "Share", "New") - real content is essentially never this
+    // small on screen, so this is almost always UI chrome, not something
+    // worth translating, and it's what made the overlay feel cluttered.
+    private fun isLikelyIconChrome(block: ScreenTextBlock): Boolean {
+        val text = block.text.trim()
+        val w = block.bounds.width()
+        val h = block.bounds.height()
+        return text.length <= 20 && w < dpToPx(64) && h < dpToPx(64)
+    }
+
+    // ---------------------------------------------------------------------
+    // Accessibility often exposes one paragraph as several small text
+    // nodes (one per line, or per sentence). Translating each separately
+    // is what made a single paragraph turn into a scatter of tiny
+    // disconnected boxes instead of one clean flowing block like Google
+    // Lens shows. This merges vertically-stacked, left-aligned blocks back
+    // into one block before translation.
+    // ---------------------------------------------------------------------
+    private fun mergeAdjacentLines(blocks: List<ScreenTextBlock>): List<ScreenTextBlock> {
+        val sorted = blocks.sortedWith(compareBy({ it.bounds.top }, { it.bounds.left }))
+        val merged = mutableListOf<ScreenTextBlock>()
+        val vGap = dpToPx(6)
+        val leftTolerance = dpToPx(24)
+
+        for (block in sorted) {
+            val last = merged.lastOrNull()
+            val sameParagraph = last != null &&
+                block.bounds.top - last.bounds.bottom in 0..vGap &&
+                abs(block.bounds.left - last.bounds.left) <= leftTolerance
+
+            if (sameParagraph && last != null) {
+                val union = android.graphics.Rect(last.bounds).apply { union(block.bounds) }
+                merged[merged.lastIndex] = ScreenTextBlock("${last.text} ${block.text}", union)
+            } else {
+                merged.add(block)
+            }
+        }
+        return merged
+    }
+
     private fun sampleBackgroundColor(bitmap: Bitmap?, bounds: android.graphics.Rect): Int {
         if (bitmap == null) return Color.WHITE
         val left = bounds.left.coerceIn(0, bitmap.width - 1)
@@ -512,7 +553,7 @@ class FloatingBubbleService : Service() {
                 // occasionally made Android flag the accessibility
                 // service as unresponsive and silently turn it off.
                 val accessibilityBlocks = withContext(Dispatchers.Default) {
-                    accessibilityService.extractVisibleText()
+                    mergeAdjacentLines(accessibilityService.extractVisibleText())
                 }
 
                 // Capture the screen once now (before any overlay is drawn
@@ -530,6 +571,13 @@ class FloatingBubbleService : Service() {
 
                 val limited = (accessibilityBlocks + ocrBlocks)
                     .filterNot { isLikelyJunkNumber(it.text) }
+                    .filterNot { isLikelyIconChrome(it) }
+                    // If there's more than fits, keep the most substantive
+                    // content (longer text) rather than whatever happened
+                    // to come first in the screen's element order - a real
+                    // paragraph should never lose its spot to a stray
+                    // three-letter label.
+                    .sortedByDescending { it.text.length }
                     .take(MAX_BLOCKS)
 
                 if (limited.isEmpty()) {
