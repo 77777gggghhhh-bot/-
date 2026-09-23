@@ -571,7 +571,7 @@ class FloatingBubbleService : Service() {
                 // colors per block AND to OCR text baked into images/video
                 // (memes, etc.) that Accessibility can never see, since
                 // that text isn't a real UI element, just pixels.
-                val screenshot = withTimeoutOrNull(2_000L) {
+                val screenshot = withTimeoutOrNull(8_000L) {
                     captureScreenshotOrNull(accessibilityService)
                 }
 
