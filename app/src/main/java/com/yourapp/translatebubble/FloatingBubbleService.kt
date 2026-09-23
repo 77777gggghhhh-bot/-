@@ -376,7 +376,7 @@ class FloatingBubbleService : Service() {
                     .addOnSuccessListener { visionText ->
                         val blocks = mutableListOf<ScreenTextBlock>()
                         for (block in visionText.textBlocks) {
-                            val text = block.text.trim()
+                            val text = normalizeOcrText(block.text)
                             val bounds = block.boundingBox
                             if (text.isNotEmpty() && bounds != null && !bounds.isEmpty) {
                                 blocks.add(ScreenTextBlock(text, bounds))
@@ -392,13 +392,23 @@ class FloatingBubbleService : Service() {
             }
         }
 
-    // Skip blocks that are just a bare number (like counts, "572" or "20K")
-    // - translating a number alone produces meaningless output; it's not
-    // actually a word to translate.
+    // Skip blocks that are just a bare number (like counts, "572" or "20K"),
+    // or a number directly glued to a short word with no real space (stat
+    // displays like "1.6Mfollowers", "536following", "1,553posts") - these
+    // come out as garbage when translated as one token since they're not
+    // actually a sentence, just a UI stat readout.
     private fun isLikelyJunkNumber(text: String): Boolean {
         val cleaned = text.trim()
-        return cleaned.matches(Regex("^[0-9\u0660-\u0669.,٬]+[KkMmبمألف]?$"))
+        if (cleaned.matches(Regex("^[0-9\u0660-\u0669.,٬]+[KkMmبمألف]?$"))) return true
+        return cleaned.matches(Regex("^[0-9\u0660-\u0669.,٬]+\\s*[KkMm]?\\s*[A-Za-z\u0600-\u06FF]{2,15}$"))
     }
+
+    // OCR sometimes returns a block's text with internal line breaks
+    // (e.g. a two-line stat like "1.6M\nfollowers"). Translating text with
+    // embedded newlines can confuse the model or glue words together with
+    // no space in the result - flatten to single-spaced text first.
+    private fun normalizeOcrText(text: String): String =
+        text.replace(Regex("\\s+"), " ").trim()
 
     // Skip tiny icon-sized elements (like toolbar icon labels: "Edit",
     // "Copy", "Share", "New") - real content is essentially never this
@@ -569,7 +579,36 @@ class FloatingBubbleService : Service() {
                     withTimeoutOrNull(6_000L) { runOcr(it) }
                 } ?: emptyList()
 
-                val limited = (accessibilityBlocks + ocrBlocks)
+                // Debug visibility (item 15 of what you asked for): record
+                // exactly what each source found this time, viewable on
+                // the "Last crash" screen. Screenshot == null here means
+                // the screen capture itself failed or timed out (common
+                // with playing video) - OCR never even got a chance to run.
+                accessibilityService.log(
+                    "Translate tap: screenshot=${if (screenshot != null) "captured ${screenshot.width}x${screenshot.height}" else "FAILED/timeout"}, " +
+                        "accessibility_blocks=${accessibilityBlocks.size} [${accessibilityBlocks.take(5).joinToString(" | ") { it.text.take(40) }}], " +
+                        "ocr_blocks=${ocrBlocks.size} [${ocrBlocks.take(5).joinToString(" | ") { it.text.take(40) }}]"
+                )
+
+                // Don't translate the same text twice: OCR scans the whole
+                // screen indiscriminately, including normal UI text that
+                // Accessibility already found and will translate more
+                // reliably. Drop any OCR block that mostly overlaps a
+                // block Accessibility already covers - OCR is only meant
+                // to catch text baked into images/video that Accessibility
+                // can't see at all.
+                val ocrOnlyBlocks = ocrBlocks.filterNot { ocrBlock ->
+                    accessibilityBlocks.any { axBlock ->
+                        val overlap = android.graphics.Rect()
+                        if (overlap.setIntersect(ocrBlock.bounds, axBlock.bounds)) {
+                            val overlapArea = overlap.width().toLong() * overlap.height()
+                            val ocrArea = ocrBlock.bounds.width().toLong() * ocrBlock.bounds.height()
+                            ocrArea > 0 && overlapArea.toDouble() / ocrArea > 0.4
+                        } else false
+                    }
+                }
+
+                val limited = (accessibilityBlocks + ocrOnlyBlocks)
                     .filterNot { isLikelyJunkNumber(it.text) }
                     .filterNot { isLikelyIconChrome(it) }
                     // If there's more than fits, keep the most substantive
