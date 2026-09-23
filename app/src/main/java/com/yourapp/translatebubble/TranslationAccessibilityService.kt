@@ -71,15 +71,18 @@ class TranslationAccessibilityService : AccessibilityService() {
     // ---------------------------------------------------------------------
     fun captureScreenshot(onResult: (Bitmap?) -> Unit) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            log("captureScreenshot: skipped, API ${Build.VERSION.SDK_INT} < 30")
             onResult(null)
             return
         }
+        val startedAt = System.currentTimeMillis()
         try {
             takeScreenshot(
                 Display.DEFAULT_DISPLAY,
                 mainExecutor,
                 object : TakeScreenshotCallback {
                     override fun onSuccess(result: ScreenshotResult) {
+                        val elapsed = System.currentTimeMillis() - startedAt
                         val bitmap = try {
                             val hardwareBitmap = Bitmap.wrapHardwareBuffer(
                                 result.hardwareBuffer, result.colorSpace
@@ -88,19 +91,27 @@ class TranslationAccessibilityService : AccessibilityService() {
                             hardwareBitmap?.recycle()
                             softwareBitmap
                         } catch (e: Exception) {
+                            log("captureScreenshot: onSuccess but bitmap conversion threw after ${elapsed}ms: ${e.javaClass.simpleName} ${e.message}")
                             null
                         } finally {
                             result.hardwareBuffer.close()
                         }
+                        log("captureScreenshot: onSuccess after ${elapsed}ms, bitmap=${if (bitmap != null) "${bitmap.width}x${bitmap.height}" else "null"}")
                         onResult(bitmap)
                     }
 
                     override fun onFailure(errorCode: Int) {
+                        val elapsed = System.currentTimeMillis() - startedAt
+                        // errorCode meanings (AccessibilityService docs):
+                        // 1=internal error, 2=no screen, 3=interval time short,
+                        // 4=invalid display
+                        log("captureScreenshot: onFailure after ${elapsed}ms, errorCode=$errorCode")
                         onResult(null)
                     }
                 }
             )
         } catch (e: Exception) {
+            log("captureScreenshot: takeScreenshot() threw immediately: ${e.javaClass.simpleName} ${e.message}")
             onResult(null)
         }
     }
