@@ -21,7 +21,11 @@ class TranslationAccessibilityService : AccessibilityService() {
             private set
     }
 
-    private fun log(message: String) {
+    // Not private anymore: FloatingBubbleService uses this to log what
+    // OCR/accessibility actually detected each time you translate, so you
+    // can check the "Last crash" screen to see exactly what was found
+    // versus missed - real visibility instead of guessing.
+    fun log(message: String) {
         try {
             val prefs = getSharedPreferences("crash_log", Context.MODE_PRIVATE)
             val existing = prefs.getString("last_crash", "") ?: ""
