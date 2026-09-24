@@ -24,6 +24,7 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.provider.Settings
+import android.speech.tts.TextToSpeech
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
@@ -81,6 +82,7 @@ class FloatingBubbleService : Service() {
     private val serviceScope = CoroutineScope(Dispatchers.Main + serviceJob)
     private val translatorHelper = TranslatorHelper()
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var tts: TextToSpeech? = null
 
     private val vibrator: Vibrator by lazy {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -115,6 +117,7 @@ class FloatingBubbleService : Service() {
         startForegroundWithNotification()
         addBubble()
         maybeRequestIgnoreBatteryOptimizations()
+        tts = TextToSpeech(this) { }
 
         val filter = IntentFilter().apply {
             addAction(ACTION_STOP)
@@ -134,6 +137,8 @@ class FloatingBubbleService : Service() {
         removeWordOverlay()
         bubbleView?.let { runCatching { windowManager.removeView(it) } }
         translatorHelper.close()
+        tts?.stop()
+        tts?.shutdown()
         serviceJob.cancel()
     }
 
@@ -422,6 +427,39 @@ class FloatingBubbleService : Service() {
     }
 
     // ---------------------------------------------------------------------
+    // Common UI action phrases from social apps (Instagram, TikTok, etc.)
+    // that showed up repeatedly as noise in real debug logs: "Reply",
+    // "See translation" (the app's OWN translate button - translating it
+    // is absurd), "Double tap to play/like", "Go to profile", "Profile
+    // picture of X", "Follow", "Menu", "New chat"... These are navigation
+    // controls, not content, and matching them by exact/contains phrase
+    // (not just size) is what actually cleans up comment sections, since
+    // several of them (avatar rows, "Double tap to play") aren't
+    // icon-sized.
+    // ---------------------------------------------------------------------
+    private val genericUiPhrases = listOf(
+        "reply", "see translation", "like", "follow", "following", "message",
+        "share", "copy", "edit", "new chat", "menu", "write", "go to profile",
+        "view profile", "profile picture", "more options", "send", "post",
+        "comment", "view likes", "double tap to like", "double tap to play",
+        "create a reel", "reels", "friends", "join the conversation",
+        "add a comment"
+    )
+
+    private fun isLikelyGenericUiPhrase(text: String): Boolean {
+        val cleaned = text.trim().lowercase()
+        if (cleaned.isEmpty() || cleaned.length > 40) return false
+        return genericUiPhrases.any { phrase ->
+            cleaned == phrase ||
+                // allow a short trailing bit (a count, a separator dot) but
+                // require the phrase to be essentially the whole block, so
+                // real sentences that merely contain a common word like
+                // "like" or "post" are never touched
+                (cleaned.startsWith(phrase) && cleaned.length <= phrase.length + 10)
+        }
+    }
+
+    // ---------------------------------------------------------------------
     // Accessibility often exposes one paragraph as several small text
     // nodes (one per line, or per sentence). Translating each separately
     // is what made a single paragraph turn into a scatter of tiny
@@ -590,27 +628,30 @@ class FloatingBubbleService : Service() {
                         "ocr_blocks=${ocrBlocks.size} [${ocrBlocks.take(5).joinToString(" | ") { it.text.take(40) }}]"
                 )
 
-                // Don't translate the same text twice: OCR scans the whole
-                // screen indiscriminately, including normal UI text that
-                // Accessibility already found and will translate more
-                // reliably. Drop any OCR block that mostly overlaps a
-                // block Accessibility already covers - OCR is only meant
-                // to catch text baked into images/video that Accessibility
-                // can't see at all.
-                val ocrOnlyBlocks = ocrBlocks.filterNot { ocrBlock ->
-                    accessibilityBlocks.any { axBlock ->
+                // Don't translate the same text twice - and when a region
+                // is covered by BOTH sources, prefer OCR's reading. OCR
+                // reads only the pixels actually rendered on screen (like
+                // Google Lens does), while Accessibility's tree often
+                // carries extra structural noise for the same visual area
+                // (avatar alt-text, separate count/label nodes, redundant
+                // container descriptions) that makes translations look
+                // scattered. Accessibility still covers anything OCR
+                // didn't manage to read.
+                val accessibilityOnlyBlocks = accessibilityBlocks.filterNot { axBlock ->
+                    ocrBlocks.any { ocrBlock ->
                         val overlap = android.graphics.Rect()
                         if (overlap.setIntersect(ocrBlock.bounds, axBlock.bounds)) {
                             val overlapArea = overlap.width().toLong() * overlap.height()
-                            val ocrArea = ocrBlock.bounds.width().toLong() * ocrBlock.bounds.height()
-                            ocrArea > 0 && overlapArea.toDouble() / ocrArea > 0.4
+                            val axArea = axBlock.bounds.width().toLong() * axBlock.bounds.height()
+                            axArea > 0 && overlapArea.toDouble() / axArea > 0.4
                         } else false
                     }
                 }
 
-                val limited = (accessibilityBlocks + ocrOnlyBlocks)
+                val limited = (ocrBlocks + accessibilityOnlyBlocks)
                     .filterNot { isLikelyJunkNumber(it.text) }
                     .filterNot { isLikelyIconChrome(it) }
+                    .filterNot { isLikelyGenericUiPhrase(it.text) }
                     // If there's more than fits, keep the most substantive
                     // content (longer text) rather than whatever happened
                     // to come first in the screen's element order - a real
@@ -732,6 +773,7 @@ class FloatingBubbleService : Service() {
         var initialTouchX = 0f
         var initialTouchY = 0f
         var longPressTriggered = false
+        var lastTapTime = 0L
         val longPressRunnable = Runnable {
             longPressTriggered = true
             copyLabelText(label)
@@ -759,7 +801,26 @@ class FloatingBubbleService : Service() {
                     runCatching { windowManager.updateViewLayout(view, params) }
                     true
                 }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                MotionEvent.ACTION_UP -> {
+                    mainHandler.removeCallbacks(longPressRunnable)
+                    val dx = abs(event.rawX - initialTouchX)
+                    val dy = abs(event.rawY - initialTouchY)
+                    val isTap = dx < CLICK_DRAG_THRESHOLD && dy < CLICK_DRAG_THRESHOLD
+                    if (!longPressTriggered && isTap) {
+                        // Double-tap = read the translation aloud; a single
+                        // tap does nothing extra (drag and long-press-copy
+                        // already cover the other gestures).
+                        val now = System.currentTimeMillis()
+                        if (now - lastTapTime < DOUBLE_TAP_MS) {
+                            lastTapTime = 0L
+                            speakLabelText(label)
+                        } else {
+                            lastTapTime = now
+                        }
+                    }
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
                     mainHandler.removeCallbacks(longPressRunnable)
                     true
                 }
@@ -773,6 +834,25 @@ class FloatingBubbleService : Service() {
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         clipboard.setPrimaryClip(ClipData.newPlainText("Translation", label.text))
         Toast.makeText(this, "Copied", Toast.LENGTH_SHORT).show()
+    }
+
+    // Reads a translated label aloud, picking Arabic or English speech
+    // based on which script the translated text is actually in - not the
+    // app's overall setting, since forced/auto mode can mix both per block.
+    private fun speakLabelText(label: TextView) {
+        val engine = tts ?: return
+        val text = label.text.toString()
+        val locale = if (translatorHelper.isArabicDominant(text)) {
+            java.util.Locale("ar")
+        } else {
+            java.util.Locale.US
+        }
+        val result = engine.setLanguage(locale)
+        if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
+            Toast.makeText(this, "Voice for this language isn't installed", Toast.LENGTH_SHORT).show()
+            return
+        }
+        engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "translate_bubble_utterance")
     }
 
     private fun removeWordOverlay() {
