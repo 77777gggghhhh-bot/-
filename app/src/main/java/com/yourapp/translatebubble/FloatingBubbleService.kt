@@ -54,6 +54,7 @@ class FloatingBubbleService : Service() {
         private const val NOTIF_ID = 1001
         private const val CLICK_DRAG_THRESHOLD = 12
         private const val LONG_PRESS_MS = 600L
+        private const val DOUBLE_TAP_MS = 300L
         private const val MAX_BLOCKS = 80
         private const val PREFS_NAME = "bubble_prefs"
         private const val PREF_X = "bubble_x"
